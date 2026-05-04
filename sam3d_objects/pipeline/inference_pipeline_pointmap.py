@@ -421,6 +421,7 @@ class InferencePipelinePointMap(InferencePipeline):
                 ss_input_dict,
                 inference_steps=stage1_inference_steps,
                 use_distillation=use_stage1_distillation,
+                intrinsics=pointmap_dict["intrinsics"],
             )
 
             # We could probably use the decoder from the models themselves

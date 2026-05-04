@@ -642,7 +642,8 @@ class InferencePipeline:
         return condition_args, condition_kwargs
 
     def sample_sparse_structure(
-        self, ss_input_dict: dict, inference_steps=None, use_distillation=False
+        self, ss_input_dict: dict, inference_steps=None, use_distillation=False,
+        intrinsics=None,
     ):
         ss_generator = self.models["ss_generator"]
         ss_decoder = self.models["ss_decoder"]
@@ -685,22 +686,56 @@ class InferencePipeline:
                     ss_input_dict,
                     self.ss_condition_input_mapping,
                 )
-                return_dict = ss_generator(
+
+                steps_dir = os.path.join(getattr(self, "cache_dir", ".cache"), "ss_steps")
+                os.makedirs(steps_dir, exist_ok=True)
+
+                for t_step, x_t, _ in ss_generator.generate_iter(
                     latent_shape_dict,
                     image.device,
                     *condition_args,
                     **condition_kwargs,
-                )
-                if not self.is_mm_dit():
-                    return_dict = {"shape": return_dict}
+                ):
+                    if not self.is_mm_dit():
+                        x_t = {"shape": x_t}
 
-                shape_latent = return_dict["shape"]
-                ss = ss_decoder(
-                    shape_latent.permute(0, 2, 1)
-                    .contiguous()
-                    .view(shape_latent.shape[0], 8, 16, 16, 16)
-                )
-                coords = torch.argwhere(ss > 0)[:, [0, 2, 3, 4]].int()
+                    shape_latent_step = x_t["shape"]
+                    ss_step = ss_decoder(
+                        shape_latent_step.permute(0, 2, 1)
+                        .contiguous()
+                        .view(shape_latent_step.shape[0], 8, 16, 16, 16)
+                    )
+                    coords_step = torch.argwhere(ss_step > 0)[:, [0, 2, 3, 4]].int()
+
+                    pose_step = self.pose_decoder(
+                        x_t,
+                        scene_scale=ss_input_dict.get("pointmap_scale", None),
+                        scene_shift=ss_input_dict.get("pointmap_shift", None),
+                    )
+                    torch.save(
+                        {
+                            "t_step": t_step,
+                            "ss_grid": ss_step.cpu(),
+                            "coords": coords_step.cpu(),
+                            "voxel": coords_step.cpu()[:, 1:].float() / 64 - 0.5,
+                            "intrinsics": intrinsics,
+                            "latent_shape": x_t["shape"].cpu(),
+                            "latent_translation": x_t["translation"].cpu(),
+                            "latent_rotation": x_t["6drotation_normalized"].cpu(),
+                            "latent_scale": x_t["scale"].cpu(),
+                            "latent_translation_scale": x_t["translation_scale"].cpu(),
+                            "pose_translation": pose_step["translation"].cpu(),
+                            "pose_rotation": pose_step["rotation"].cpu(),
+                            "pose_scale": pose_step["scale"].cpu(),
+                        },
+                        os.path.join(steps_dir, f"step_{t_step:.3f}.pt"),
+                    )
+
+                return_dict = x_t  # final step = denoised latent
+                if not self.is_mm_dit():
+                    return_dict = {"shape": return_dict["shape"]}
+
+                coords = coords_step  # reuse last iteration's result
 
                 # downsample output
                 return_dict["coords_original"] = coords
